@@ -7,7 +7,76 @@ import { Page } from "playwright";
 import { CLIArgs } from "../processCLIArgs";
 import saveStream, { sanitizeName } from "../utils";
 
-export type SaveOptions = Pick<CLIArgs, "saveHTML" | "ignoreSaveErrors">;
+export type SaveOptions = Pick<
+  CLIArgs,
+  | "saveHTML"
+  | "ignoreSaveErrors"
+  | "expandInteractive"
+  | "followDiagnosticLinks"
+>;
+
+interface DiagnosticLink {
+  id: string;
+  title?: string;
+}
+
+// Extract diagnostic/pinpoint test link docIDs from HTML
+function extractDiagnosticLinks(html: string): DiagnosticLink[] {
+  const links: DiagnosticLink[] = [];
+  const seenIds = new Set<string>();
+
+  // Pattern 1: Links with searchNumber parameter
+  // Example: <a href="?searchNumber=G1234567">Pinpoint Test N</a>
+  const searchNumberPattern = /searchNumber[=:]([A-Z0-9]+)/gi;
+  let match;
+  while ((match = searchNumberPattern.exec(html)) !== null) {
+    const docId = match[1];
+    if (!seenIds.has(docId)) {
+      seenIds.add(docId);
+
+      // Try to find the title from nearby text
+      const contextStart = Math.max(0, match.index - 200);
+      const contextEnd = Math.min(html.length, match.index + 200);
+      const context = html.substring(contextStart, contextEnd);
+
+      // Look for "Pinpoint Test" or similar patterns
+      const titleMatch = context.match(
+        /(?:Pinpoint Test|GO to|Test|Procedure)\s+([A-Z0-9\s\-:]+)/i
+      );
+      const title = titleMatch ? titleMatch[1].trim() : undefined;
+
+      links.push({
+        id: docId,
+        title: title ? `Pinpoint Test ${title}` : undefined,
+      });
+    }
+  }
+
+  // Pattern 2: Links in onclick handlers
+  // Example: onclick="showDiagnostic('G1234567')"
+  const onclickPattern = /onclick=["'].*?['"]G([0-9]{7})["']/gi;
+  while ((match = onclickPattern.exec(html)) !== null) {
+    const docId = `G${match[1]}`;
+    if (!seenIds.has(docId)) {
+      seenIds.add(docId);
+      links.push({ id: docId });
+    }
+  }
+
+  // Pattern 3: Direct docID references in diagnostic context
+  // Only match G-prefixed docIDs that appear in diagnostic-related text
+  const diagnosticContextPattern =
+    /(pinpoint|test|diagnostic|procedure|dtc).*?(G[0-9]{7})/gi;
+  while ((match = diagnosticContextPattern.exec(html)) !== null) {
+    const docId = match[2];
+    if (!seenIds.has(docId)) {
+      seenIds.add(docId);
+      links.push({ id: docId });
+    }
+  }
+
+  return links;
+}
 
 export default async function saveEntireManual(
   path: string,
@@ -93,9 +162,143 @@ export default async function saveEntireManual(
         await browserPage.evaluate(
           'document.querySelectorAll("body > div > table > tbody > tr > td:nth-child(2)").forEach(e => e.remove())'
         );
+
+        // Expand interactive elements if requested
+        if (options.expandInteractive) {
+          try {
+            console.log(
+              `-> Expanding interactive elements for ${name} (docID: ${docID})`
+            );
+
+            // Click all "Click for details" and similar expandable links
+            await browserPage.evaluate(() => {
+              // Find and click all expandable elements
+              const selectors = [
+                'a[href*="details"]',
+                'a[onclick*="show"]',
+                'a[onclick*="expand"]',
+                'a[onclick*="display"]',
+                ".expandable",
+                '[onclick*="Details"]',
+                '[onclick*="Show"]',
+              ];
+
+              selectors.forEach((selector) => {
+                document.querySelectorAll(selector).forEach((el) => {
+                  try {
+                    (el as HTMLElement).click();
+                  } catch (e) {
+                    // Ignore click errors
+                  }
+                });
+              });
+            });
+
+            // Wait for potential AJAX requests and animations
+            await browserPage.waitForTimeout(3000);
+
+            // Try to wait for network to be idle (with short timeout)
+            try {
+              await browserPage.waitForLoadState("networkidle", {
+                timeout: 5000,
+              });
+            } catch (e) {
+              // Ignore timeout, continue anyway
+            }
+          } catch (e) {
+            console.error(
+              `-> Warning: Error expanding interactive elements: ${e}`
+            );
+            // Continue to PDF generation even if expansion fails
+          }
+        }
+
         await browserPage.pdf({
           path: pdfPath,
         });
+
+        // Follow diagnostic links if requested and we're in a diagnostic section
+        if (
+          options.followDiagnosticLinks &&
+          (path.includes("Diagnosis") || path.includes("Testing"))
+        ) {
+          try {
+            console.log(
+              `-> Scanning for linked diagnostic procedures in ${name}`
+            );
+
+            // Extract diagnostic link docIDs from the HTML
+            const linkedDocIDs = extractDiagnosticLinks(pageHTML);
+
+            if (linkedDocIDs.length > 0) {
+              console.log(
+                `-> Found ${linkedDocIDs.length} linked diagnostic procedures`
+              );
+
+              // Download each linked diagnostic page
+              for (const linkedDocID of linkedDocIDs) {
+                const linkedFilename = sanitizeName(
+                  `${linkedDocID.title || linkedDocID.id}`
+                );
+                const linkedPdfPath = join(path, `/${linkedFilename}.pdf`);
+
+                // Check if already exists (resume capability)
+                if (existsSync(linkedPdfPath)) {
+                  console.log(
+                    `-> Skipping linked diagnostic ${
+                      linkedDocID.title || linkedDocID.id
+                    } (already exists)`
+                  );
+                  continue;
+                }
+
+                console.log(
+                  `-> Downloading linked diagnostic: ${
+                    linkedDocID.title || linkedDocID.id
+                  }`
+                );
+
+                try {
+                  const linkedPageHTML = await fetchManualPage({
+                    ...fetchPageParams,
+                    searchNumber: linkedDocID.id,
+                  });
+
+                  if (options.saveHTML) {
+                    const linkedHtmlPath = resolve(
+                      join(path, `/${linkedFilename}.html`)
+                    );
+                    await writeFile(linkedHtmlPath, linkedPageHTML);
+                  }
+
+                  await browserPage.setContent(linkedPageHTML, {
+                    waitUntil: "load",
+                  });
+                  await browserPage.evaluate(
+                    'document.querySelectorAll("body > div > table > tbody > tr > td:nth-child(2)").forEach(e => e.remove())'
+                  );
+
+                  await browserPage.pdf({
+                    path: linkedPdfPath,
+                  });
+                } catch (linkError) {
+                  console.error(
+                    `-> Error downloading linked diagnostic ${linkedDocID.id}:`,
+                    linkError
+                  );
+                  if (!options.ignoreSaveErrors) {
+                    throw linkError;
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            console.error(`-> Warning: Error following diagnostic links: ${e}`);
+            if (!options.ignoreSaveErrors) {
+              throw e;
+            }
+          }
+        }
       } catch (e) {
         if (options.ignoreSaveErrors) {
           console.error(
