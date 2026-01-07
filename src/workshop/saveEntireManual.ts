@@ -1,4 +1,5 @@
 import { mkdir, writeFile } from "fs/promises";
+import { existsSync } from "fs";
 import { join, resolve } from "path";
 import fetchManualPage, { FetchManualPageParams } from "./fetchManualPage";
 import client from "../client";
@@ -45,11 +46,6 @@ export default async function saveEntireManual(
         continue;
       }
 
-      console.log(
-        `Downloading manual page ${name} as ${
-          options.saveHTML ? "HTML, " : ""
-        }PDF (docID: ${docID})`
-      );
       let filename = sanitizeName(name);
       // 255 is the max filename length on most filesystems, but 200 should be enough regardless
       if (filename.length > 200) {
@@ -63,6 +59,22 @@ export default async function saveEntireManual(
 
         console.log(`-> Truncating filename, learn more in the README`);
       }
+
+      const pdfPath = join(path, `/${filename}.pdf`);
+
+      // Check if PDF already exists (resume capability)
+      if (existsSync(pdfPath)) {
+        console.log(
+          `Skipping manual page ${name} (already exists) (docID: ${docID})`
+        );
+        continue;
+      }
+
+      console.log(
+        `Downloading manual page ${name} as ${
+          options.saveHTML ? "HTML, " : ""
+        }PDF (docID: ${docID})`
+      );
 
       try {
         const pageHTML = await fetchManualPage({
@@ -82,7 +94,7 @@ export default async function saveEntireManual(
           'document.querySelectorAll("body > div > table > tbody > tr > td:nth-child(2)").forEach(e => e.remove())'
         );
         await browserPage.pdf({
-          path: join(path, `/${filename}.pdf`),
+          path: pdfPath,
         });
       } catch (e) {
         if (options.ignoreSaveErrors) {
