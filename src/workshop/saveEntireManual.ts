@@ -130,20 +130,32 @@ export default async function saveEntireManual(
       }
 
       const pdfPath = join(path, `/${filename}.pdf`);
+      const pdfAlreadyExists = existsSync(pdfPath);
 
-      // Check if PDF already exists (resume capability)
-      if (existsSync(pdfPath)) {
+      // Check if we need to scan for diagnostic links even if PDF exists
+      const shouldScanForLinks =
+        options.followDiagnosticLinks &&
+        (path.includes("Diagnosis") || path.includes("Testing"));
+
+      // Skip if PDF exists and we don't need to scan for links
+      if (pdfAlreadyExists && !shouldScanForLinks) {
         console.log(
           `Skipping manual page ${name} (already exists) (docID: ${docID})`
         );
         continue;
       }
 
-      console.log(
-        `Downloading manual page ${name} as ${
-          options.saveHTML ? "HTML, " : ""
-        }PDF (docID: ${docID})`
-      );
+      if (pdfAlreadyExists && shouldScanForLinks) {
+        console.log(
+          `Skipping PDF for ${name} (already exists), but scanning for linked diagnostics (docID: ${docID})`
+        );
+      } else {
+        console.log(
+          `Downloading manual page ${name} as ${
+            options.saveHTML ? "HTML, " : ""
+          }PDF (docID: ${docID})`
+        );
+      }
 
       try {
         const pageHTML = await fetchManualPage({
@@ -170,9 +182,54 @@ export default async function saveEntireManual(
               `-> Expanding interactive elements for ${name} (docID: ${docID})`
             );
 
-            // Click all "Click for details" and similar expandable links
+            // Expand all pinpoint test sections and hidden content
             await browserPage.evaluate(() => {
-              // Find and click all expandable elements
+              // 1. Expand all pinpoint test sections (main collapsed sections)
+              // These are the collapsible sections with class "isipppt"
+              const pinpointHeaders = document.querySelectorAll('.isipppt');
+              console.log(`Found ${pinpointHeaders.length} pinpoint test headers`);
+              pinpointHeaders.forEach((header) => {
+                try {
+                  (header as HTMLElement).click();
+                } catch (e) {
+                  console.error('Error clicking pinpoint header:', e);
+                }
+              });
+
+              // 2. Force display all pinpoint test content divs
+              // Pattern: <div id="PPTA" style="display:none"> where A-Z
+              const pinpointDivs = document.querySelectorAll('div[id^="PPT"]');
+              console.log(`Found ${pinpointDivs.length} pinpoint test content divs`);
+              pinpointDivs.forEach((div) => {
+                (div as HTMLElement).style.display = 'block';
+              });
+
+              // 3. Show all hidden pinpoint test steps
+              // Pattern: <tr data-content-type="step" style="display:none;">
+              const stepRows = document.querySelectorAll('tr[data-content-type="step"]');
+              console.log(`Found ${stepRows.length} pinpoint test step rows`);
+              stepRows.forEach((row) => {
+                (row as HTMLElement).style.display = '';
+              });
+
+              // 4. Expand "Click for details" links and show their hidden content
+              const clickForDetailsLinks = document.querySelectorAll('a[data-pptlinktype="clickfordetails"]');
+              console.log(`Found ${clickForDetailsLinks.length} click-for-details links`);
+              clickForDetailsLinks.forEach((link) => {
+                try {
+                  // Hide the link
+                  (link as HTMLElement).style.display = 'none';
+                  // Show the next sibling span which contains the hidden text
+                  const nextSpan = link.nextElementSibling;
+                  if (nextSpan && nextSpan.tagName === 'SPAN') {
+                    (nextSpan as HTMLElement).style.display = 'inline';
+                  }
+                } catch (e) {
+                  console.error('Error expanding click-for-details:', e);
+                }
+              });
+
+              // 5. Click other expandable elements (generic catch-all)
               const selectors = [
                 'a[href*="details"]',
                 'a[onclick*="show"]',
@@ -186,7 +243,9 @@ export default async function saveEntireManual(
               selectors.forEach((selector) => {
                 document.querySelectorAll(selector).forEach((el) => {
                   try {
-                    (el as HTMLElement).click();
+                    if (!(el as HTMLElement).closest('[data-pptlinktype="clickfordetails"]')) {
+                      (el as HTMLElement).click();
+                    }
                   } catch (e) {
                     // Ignore click errors
                   }
@@ -213,9 +272,12 @@ export default async function saveEntireManual(
           }
         }
 
-        await browserPage.pdf({
-          path: pdfPath,
-        });
+        // Only generate PDF if it doesn't already exist
+        if (!pdfAlreadyExists) {
+          await browserPage.pdf({
+            path: pdfPath,
+          });
+        }
 
         // Follow diagnostic links if requested and we're in a diagnostic section
         if (
