@@ -1,7 +1,6 @@
 import { Page } from "playwright";
 import { JSDOM } from "jsdom";
 import { createWriteStream, existsSync } from "fs";
-import { pathToFileURL } from "url";
 import fetchPageList from "./fetchPageList";
 import fetchBasicPage from "./fetchBasicPage";
 import {
@@ -129,13 +128,35 @@ export default async function savePage(
         continue;
       }
 
-      // Use pathToFileURL to properly handle special characters like # in filenames.
-      const fileUrl = pathToFileURL(resolve(svgPath)).href;
-      await browserPage.goto(fileUrl);
-      await browserPage.pdf({
-        path: pdfPath,
-        landscape: true,
-      });
+      // Use setContent instead of goto(file://) to avoid ERR_ABORTED / frame-detached
+      // errors that Chromium can throw when navigating to local SVG files.
+      // We already have svgString in memory so no file read is needed.
+      const htmlForPdf = `<!DOCTYPE html><html><head><style>` +
+        `* { margin: 0; padding: 0; } svg { display: block; width: 100%; height: auto; }` +
+        `</style></head><body>${svgString}</body></html>`;
+
+      // Retry once — large wiring SVGs can transiently fail to print.
+      let pdfError: unknown;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          await browserPage.setContent(htmlForPdf, { waitUntil: "load" });
+          await browserPage.pdf({
+            path: pdfPath,
+            landscape: true,
+          });
+          pdfError = undefined;
+          break;
+        } catch (e) {
+          pdfError = e;
+          if (attempt < 2) {
+            console.warn(
+              `  PDF attempt ${attempt} failed for page ${pageNumber} of ${doc.Title}, retrying...`
+            );
+            await browserPage.waitForTimeout(2000);
+          }
+        }
+      }
+      if (pdfError) throw pdfError;
     } catch (e: any) {
       if (ignoreSaveErrors) {
         console.error(

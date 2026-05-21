@@ -3,6 +3,7 @@ import { existsSync } from "fs";
 import { join, resolve } from "path";
 import fetchManualPage, { FetchManualPageParams } from "./fetchManualPage";
 import client from "../client";
+import { JSDOM } from "jsdom";
 import { Page } from "playwright";
 import { CLIArgs } from "../processCLIArgs";
 import saveStream, { sanitizeName } from "../utils";
@@ -13,6 +14,7 @@ export type SaveOptions = Pick<
   | "ignoreSaveErrors"
   | "expandInteractive"
   | "followDiagnosticLinks"
+  | "downloadVideos"
 >;
 
 interface DiagnosticLink {
@@ -78,6 +80,101 @@ function extractDiagnosticLinks(html: string): DiagnosticLink[] {
   return links;
 }
 
+// Video file extensions to look for
+const VIDEO_EXTENSIONS = [".mp4", ".webm", ".ogg", ".mov", ".m4v", ".avi", ".mkv"];
+
+function isVideoURL(url: string): boolean {
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    return VIDEO_EXTENSIONS.some((ext) => pathname.endsWith(ext));
+  } catch {
+    const lower = url.toLowerCase().split("?")[0];
+    return VIDEO_EXTENSIONS.some((ext) => lower.endsWith(ext));
+  }
+}
+
+// Extract video URLs from HTML using JSDOM and regex
+function extractVideoURLs(html: string): string[] {
+  const urls = new Set<string>();
+
+  try {
+    const { window } = new JSDOM(html);
+    const document = window.document;
+
+    // <video src="...">
+    document.querySelectorAll("video[src]").forEach((el: Element) => {
+      const src = el.getAttribute("src");
+      if (src && isVideoURL(src)) urls.add(src);
+    });
+
+    // <source src="..."> inside <video>
+    document.querySelectorAll("video source[src]").forEach((el: Element) => {
+      const src = el.getAttribute("src");
+      if (src && isVideoURL(src)) urls.add(src);
+    });
+
+    // <a href="..."> links to video files
+    document.querySelectorAll("a[href]").forEach((el: Element) => {
+      const href = el.getAttribute("href");
+      if (href && isVideoURL(href)) urls.add(href);
+    });
+  } catch (e) {
+    console.error(`-> Warning: JSDOM parsing failed for video extraction: ${e}`);
+  }
+
+  // Regex fallback: catches URLs in JS strings or data attributes
+  const videoRegex =
+    /["'](https?:\/\/[^"'\s]*?\.(?:mp4|webm|ogg|mov|m4v|avi|mkv)[^"'\s]*)["']/gi;
+  let match;
+  while ((match = videoRegex.exec(html)) !== null) {
+    urls.add(match[1]);
+  }
+
+  return Array.from(urls);
+}
+
+// Download a list of video URLs into dir, skipping already-downloaded files
+async function downloadVideoFiles(
+  videoURLs: string[],
+  dir: string
+): Promise<void> {
+  const total = videoURLs.length;
+  let downloaded = 0;
+
+  for (const [i, url] of videoURLs.entries()) {
+    const progress = `(${i + 1}/${total})`;
+    let urlPathname: string;
+    try {
+      urlPathname = new URL(url).pathname;
+    } catch {
+      urlPathname = url.split("?")[0];
+    }
+
+    const rawFileName = urlPathname.split("/").pop() || "video.mp4";
+    const videoFileName = sanitizeName(rawFileName);
+    const videoPath = join(dir, videoFileName);
+
+    if (existsSync(videoPath)) {
+      console.log(`-> Video ${progress} already exists, skipping: ${videoFileName}`);
+      continue;
+    }
+
+    console.log(`-> Downloading video ${progress}: ${videoFileName}`);
+    try {
+      const response = await client({ url, responseType: "stream" });
+      await saveStream(response.data, videoPath);
+      downloaded++;
+      console.log(`-> Saved video ${progress}: ${videoFileName}`);
+    } catch (e) {
+      console.error(`-> Error downloading video ${progress} ${videoFileName}: ${e}`);
+    }
+  }
+
+  if (downloaded > 0) {
+    console.log(`-> Downloaded ${downloaded}/${total} video(s)`);
+  }
+}
+
 export default async function saveEntireManual(
   path: string,
   toc: any,
@@ -137,17 +234,23 @@ export default async function saveEntireManual(
         options.followDiagnosticLinks &&
         (path.includes("Diagnosis") || path.includes("Testing"));
 
-      // Skip if PDF exists and we don't need to scan for links
-      if (pdfAlreadyExists && !shouldScanForLinks) {
+      // Check if we need to look for videos even if PDF exists
+      const shouldCheckVideos = options.downloadVideos;
+
+      // Skip if PDF exists and we don't need to scan for links or videos
+      if (pdfAlreadyExists && !shouldScanForLinks && !shouldCheckVideos) {
         console.log(
           `Skipping manual page ${name} (already exists) (docID: ${docID})`
         );
         continue;
       }
 
-      if (pdfAlreadyExists && shouldScanForLinks) {
+      if (pdfAlreadyExists) {
+        const resumeActions: string[] = [];
+        if (shouldScanForLinks) resumeActions.push("scanning for diagnostic links");
+        if (shouldCheckVideos) resumeActions.push("checking for videos");
         console.log(
-          `Skipping PDF for ${name} (already exists), but scanning for linked diagnostics (docID: ${docID})`
+          `PDF for ${name} already exists; resuming: ${resumeActions.join(", ")} (docID: ${docID})`
         );
       } else {
         console.log(
@@ -168,115 +271,131 @@ export default async function saveEntireManual(
           await writeFile(htmlPath, pageHTML);
         }
 
-        await browserPage.setContent(pageHTML, { waitUntil: "load" });
-        // removes this little color-coded thing that doesn't load properly
-        // in Playwright, just says "Workshop Manual Graphics Training"...
-        await browserPage.evaluate(
-          'document.querySelectorAll("body > div > table > tbody > tr > td:nth-child(2)").forEach(e => e.remove())'
-        );
+        // Browser rendering is only needed to generate a new PDF.
+        // Video extraction and diagnostic link scanning work on the raw HTML string.
+        if (!pdfAlreadyExists) {
+          await browserPage.setContent(pageHTML, { waitUntil: "load" });
+          // removes this little color-coded thing that doesn't load properly
+          // in Playwright, just says "Workshop Manual Graphics Training"...
+          await browserPage.evaluate(
+            'document.querySelectorAll("body > div > table > tbody > tr > td:nth-child(2)").forEach(e => e.remove())'
+          );
 
-        // Expand interactive elements if requested
-        if (options.expandInteractive) {
-          try {
-            console.log(
-              `-> Expanding interactive elements for ${name} (docID: ${docID})`
-            );
+          // Expand interactive elements if requested
+          if (options.expandInteractive) {
+            try {
+              console.log(
+                `-> Expanding interactive elements for ${name} (docID: ${docID})`
+              );
 
-            // Expand all pinpoint test sections and hidden content
-            await browserPage.evaluate(() => {
-              // 1. Expand all pinpoint test sections (main collapsed sections)
-              // These are the collapsible sections with class "isipppt"
-              const pinpointHeaders = document.querySelectorAll('.isipppt');
-              console.log(`Found ${pinpointHeaders.length} pinpoint test headers`);
-              pinpointHeaders.forEach((header) => {
-                try {
-                  (header as HTMLElement).click();
-                } catch (e) {
-                  console.error('Error clicking pinpoint header:', e);
-                }
-              });
-
-              // 2. Force display all pinpoint test content divs
-              // Pattern: <div id="PPTA" style="display:none"> where A-Z
-              const pinpointDivs = document.querySelectorAll('div[id^="PPT"]');
-              console.log(`Found ${pinpointDivs.length} pinpoint test content divs`);
-              pinpointDivs.forEach((div) => {
-                (div as HTMLElement).style.display = 'block';
-              });
-
-              // 3. Show all hidden pinpoint test steps
-              // Pattern: <tr data-content-type="step" style="display:none;">
-              const stepRows = document.querySelectorAll('tr[data-content-type="step"]');
-              console.log(`Found ${stepRows.length} pinpoint test step rows`);
-              stepRows.forEach((row) => {
-                (row as HTMLElement).style.display = '';
-              });
-
-              // 4. Expand "Click for details" links and show their hidden content
-              const clickForDetailsLinks = document.querySelectorAll('a[data-pptlinktype="clickfordetails"]');
-              console.log(`Found ${clickForDetailsLinks.length} click-for-details links`);
-              clickForDetailsLinks.forEach((link) => {
-                try {
-                  // Hide the link
-                  (link as HTMLElement).style.display = 'none';
-                  // Show the next sibling span which contains the hidden text
-                  const nextSpan = link.nextElementSibling;
-                  if (nextSpan && nextSpan.tagName === 'SPAN') {
-                    (nextSpan as HTMLElement).style.display = 'inline';
-                  }
-                } catch (e) {
-                  console.error('Error expanding click-for-details:', e);
-                }
-              });
-
-              // 5. Click other expandable elements (generic catch-all)
-              const selectors = [
-                'a[href*="details"]',
-                'a[onclick*="show"]',
-                'a[onclick*="expand"]',
-                'a[onclick*="display"]',
-                ".expandable",
-                '[onclick*="Details"]',
-                '[onclick*="Show"]',
-              ];
-
-              selectors.forEach((selector) => {
-                document.querySelectorAll(selector).forEach((el) => {
+              // Expand all pinpoint test sections and hidden content
+              await browserPage.evaluate(() => {
+                // 1. Expand all pinpoint test sections (main collapsed sections)
+                // These are the collapsible sections with class "isipppt"
+                const pinpointHeaders = document.querySelectorAll('.isipppt');
+                console.log(`Found ${pinpointHeaders.length} pinpoint test headers`);
+                pinpointHeaders.forEach((header) => {
                   try {
-                    if (!(el as HTMLElement).closest('[data-pptlinktype="clickfordetails"]')) {
-                      (el as HTMLElement).click();
-                    }
+                    (header as HTMLElement).click();
                   } catch (e) {
-                    // Ignore click errors
+                    console.error('Error clicking pinpoint header:', e);
                   }
                 });
-              });
-            });
 
-            // Wait for potential AJAX requests and animations
-            await browserPage.waitForTimeout(3000);
+                // 2. Force display all pinpoint test content divs
+                // Pattern: <div id="PPTA" style="display:none"> where A-Z
+                const pinpointDivs = document.querySelectorAll('div[id^="PPT"]');
+                console.log(`Found ${pinpointDivs.length} pinpoint test content divs`);
+                pinpointDivs.forEach((div) => {
+                  (div as HTMLElement).style.display = 'block';
+                });
 
-            // Try to wait for network to be idle (with short timeout)
-            try {
-              await browserPage.waitForLoadState("networkidle", {
-                timeout: 5000,
+                // 3. Show all hidden pinpoint test steps
+                // Pattern: <tr data-content-type="step" style="display:none;">
+                const stepRows = document.querySelectorAll('tr[data-content-type="step"]');
+                console.log(`Found ${stepRows.length} pinpoint test step rows`);
+                stepRows.forEach((row) => {
+                  (row as HTMLElement).style.display = '';
+                });
+
+                // 4. Expand "Click for details" links and show their hidden content
+                const clickForDetailsLinks = document.querySelectorAll('a[data-pptlinktype="clickfordetails"]');
+                console.log(`Found ${clickForDetailsLinks.length} click-for-details links`);
+                clickForDetailsLinks.forEach((link) => {
+                  try {
+                    // Hide the link
+                    (link as HTMLElement).style.display = 'none';
+                    // Show the next sibling span which contains the hidden text
+                    const nextSpan = link.nextElementSibling;
+                    if (nextSpan && nextSpan.tagName === 'SPAN') {
+                      (nextSpan as HTMLElement).style.display = 'inline';
+                    }
+                  } catch (e) {
+                    console.error('Error expanding click-for-details:', e);
+                  }
+                });
+
+                // 5. Click other expandable elements (generic catch-all)
+                const selectors = [
+                  'a[href*="details"]',
+                  'a[onclick*="show"]',
+                  'a[onclick*="expand"]',
+                  'a[onclick*="display"]',
+                  ".expandable",
+                  '[onclick*="Details"]',
+                  '[onclick*="Show"]',
+                ];
+
+                selectors.forEach((selector) => {
+                  document.querySelectorAll(selector).forEach((el) => {
+                    try {
+                      if (!(el as HTMLElement).closest('[data-pptlinktype="clickfordetails"]')) {
+                        (el as HTMLElement).click();
+                      }
+                    } catch (e) {
+                      // Ignore click errors
+                    }
+                  });
+                });
               });
+
+              // Wait for potential AJAX requests and animations
+              await browserPage.waitForTimeout(3000);
+
+              // Try to wait for network to be idle (with short timeout)
+              try {
+                await browserPage.waitForLoadState("networkidle", {
+                  timeout: 5000,
+                });
+              } catch (e) {
+                // Ignore timeout, continue anyway
+              }
             } catch (e) {
-              // Ignore timeout, continue anyway
+              console.error(
+                `-> Warning: Error expanding interactive elements: ${e}`
+              );
+              // Continue to PDF generation even if expansion fails
             }
-          } catch (e) {
-            console.error(
-              `-> Warning: Error expanding interactive elements: ${e}`
-            );
-            // Continue to PDF generation even if expansion fails
           }
-        }
 
-        // Only generate PDF if it doesn't already exist
-        if (!pdfAlreadyExists) {
           await browserPage.pdf({
             path: pdfPath,
           });
+        }
+
+        // Download videos if requested.
+        // extractVideoURLs works on the raw HTML string, so no browser rendering needed —
+        // this runs for both new downloads and resume (PDF already existed).
+        if (options.downloadVideos) {
+          const videoURLs = extractVideoURLs(pageHTML);
+          if (videoURLs.length > 0) {
+            console.log(
+              `-> Found ${videoURLs.length} video(s) in "${name}", downloading...`
+            );
+            await downloadVideoFiles(videoURLs, path);
+          } else {
+            console.log(`-> No videos found in "${name}"`);
+          }
         }
 
         // Follow diagnostic links if requested and we're in a diagnostic section

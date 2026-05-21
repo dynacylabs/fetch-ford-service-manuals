@@ -1,0 +1,30 @@
+{
+  "workshop": {
+    "vehicleId": "6698",
+    "modelYear": "2021",
+    "channel": "9",
+    "book": "SM2",
+    "bookTitle": "2021 F-150",
+    "WiringBookCode": "EM2",
+    "WiringBookTitle": "2021 F-150",
+    "booktype": "ody",
+
+    "country": "USA",
+    "language": "EN-US",
+    "contentmarket": "US",
+    "contentlanguage": "EN",
+    "languageOdysseyCode": "ENUSA",
+    "searchNumber": "0",
+    "Vid": "CZF",
+    "byvin": "NO",
+    "marketGroup": "NA"
+  },
+  "wiring": {
+    "environment": "prod_1_3_5212026",
+    "bookType": "svg",
+    "languageCode": "ENUSA"
+  },
+  "pre_2003": {
+    "alphabeticalIndexURL": "https://www.fordservicecontent.com/pubs/content/....."
+  }
+}

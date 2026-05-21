@@ -1,0 +1,30 @@
+{
+  "workshop": {
+    "vehicleId": "5780",
+    "modelYear": "2016",
+    "channel": "9",
+    "book": "SGO",
+    "bookTitle": "2016 F-250-550 Super Duty",
+    "WiringBookCode": "E0X",
+    "WiringBookTitle": "2016 F-250-550 Super Duty",
+    "booktype": "gsi",
+
+    "country": "USA",
+    "language": "EN-US",
+    "contentmarket": "US",
+    "contentlanguage": "EN",
+    "languageOdysseyCode": "ENUSA",
+    "searchNumber": "0",
+    "Vid": "CZF",
+    "byvin": "NO",
+    "marketGroup": "NA"
+  },
+  "wiring": {
+    "environment": "prod_1_3_5202026",
+    "bookType": "svg",
+    "languageCode": "ENUSA"
+  },
+  "pre_2003": {
+    "alphabeticalIndexURL": "https://www.fordservicecontent.com/pubs/content/....."
+  }
+}

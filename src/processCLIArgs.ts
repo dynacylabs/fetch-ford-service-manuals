@@ -13,6 +13,7 @@ export interface CLIArgs {
   ignoreSaveErrors: boolean;
   expandInteractive: boolean;
   followDiagnosticLinks: boolean;
+  downloadVideos: boolean;
 }
 
 export default function processCLIArgs(): CLIArgs {
@@ -70,6 +71,11 @@ export default function processCLIArgs(): CLIArgs {
     },
     {
       name: "followDiagnosticLinks",
+      type: Boolean,
+      default: false,
+    },
+    {
+      name: "downloadVideos",
       type: Boolean,
       default: false,
     },
@@ -151,6 +157,12 @@ export default function processCLIArgs(): CLIArgs {
             "Follow and download linked diagnostic/pinpoint test procedures from DTC charts and diagnostic pages. Significantly increases download time and page count. Default: false.",
         },
         {
+          name: "downloadVideos",
+          typeLabel: " ",
+          description:
+            "Download video files linked or embedded in manual pages. Videos are saved alongside the PDF in the same directory. Default: false.",
+        },
+        {
           name: "help",
           typeLabel: " ",
           description: "Print this usage guide.",
@@ -186,6 +198,7 @@ export default function processCLIArgs(): CLIArgs {
       ignoreSaveErrors: !!options.ignoreSaveErrors,
       expandInteractive: !!options.expandInteractive,
       followDiagnosticLinks: !!options.followDiagnosticLinks,
+      downloadVideos: !!options.downloadVideos,
     };
   } catch (e: any) {
     console.error(e);
