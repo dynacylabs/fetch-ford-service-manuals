@@ -281,3 +281,4 @@ I wanted to have the manual for my car, and I bought the subscription hoping to 
 ### Why do you fetch pages one-at-a-time?
 
 Two reasons. Firstly, I don't want to DDoS Ford (they also have Akamai in front of this, and a ton of parallel requests would absolutely trigger it and get us blocked). Secondly, it was easier to code synchronously.
+git p
