@@ -106,10 +106,12 @@ This script requires some data about your car that's not available in the PTS GU
 6. Create a copy of `cookieString.txt.template` called `cookieString.txt` if you haven't already.
 7. Filter for the GET request to this URL: `https://www.fordtechservice.dealerconnection.com/wiring/TableOfContents` (there are query params at the end, that's ok).
    - Unlike last time, make sure "Contents" in the url is PLURAL: `TableOfContent`**`s`**, not `TableOfContent`
-8. Go to the request headers and find the "Cookie:" entry.
-9. Copy the cookies from this request (triple-click to select all) and paste into the `cookieString.txt` file.
-   - Do **not** include the name of the header (`cookieString.txt` should **not** include `Cookie:`, for example.)
-   - NOTE: In Firefox, you MUST enable the *Raw* toggle at the top right of Response Headers, then copy it from there. If you don't, you'll get an invalid character error when trying to fetch wiring diagrams.
+8. Get the cookie string from that request using one of these methods:
+   - **Chrome / Chromium-based browsers:** open the request headers, find the `Cookie:` request header, and copy its full value.
+   - **Firefox (recommended fallback):** right-click the request in the Network tab, click **Save All As HAR**, open the `.har` file in a text editor, search for `"cookie"`, and copy the full cookie header string from that wiring request.
+9. Paste the cookie value into `cookieString.txt`.
+   - Do **not** include the header name (`cookieString.txt` should **not** include `Cookie:`).
+   - Make sure it is one semicolon-separated cookie string (for example: `name1=value1; name2=value2; ...`).
 10. Save `cookieString.txt`.
 
 ### Download the manual!
@@ -236,8 +238,7 @@ All worked flawlessly!
 To re-collect cookies, follow the instructions in [this](#all-vehicles-get-wiring-data) set of instructions, making sure you:
 
 - Remove the `Cookie: ` part of the header, if you copied it
-- If using Firefox, enabled the `Raw` toggle at the top right of `Request Headers`
-  - For best results, use Chrome
+- If using Firefox and header copy is unreliable, export Network requests as a HAR file and copy the cookie string from the HAR contents
 - Added a `; ` between the first paste and second paste
 
 If you're still having trouble, [reach out](#can-i-get-helpsupport).
